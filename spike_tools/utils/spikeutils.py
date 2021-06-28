@@ -5,6 +5,7 @@ import logging
 import numpy as np
 import scipy.io as sio
 import pandas as pd
+import h5py
 
 from utils.intanutils import read_amplifier
 from utils.filter import bandpass_filter, notch_filter
@@ -12,6 +13,44 @@ from utils import find_nearest
 
 
 def get_spike_times(num, date, raw_dir, proc_dir, f_sampling, n_channels, f_low, f_high, noise_threshold, save_waveform=False):
+    """
+    Reads data from a single Intan amplifier channel file and extracts spike event times (ms).
+
+    Parameters
+    ----------
+    num : int
+        Amplifier channel number aka SLURM job array ID.
+    date : str
+        The date of the recording session. This is used to search directory and file names and filter out sessions only
+         for a particular date. No "smart" searches are supported -- it'll fail to lookup if you use, say,
+         20210624 instead of 210624.
+    raw_dir : str
+        Full path to the directory housing all output directories spit out by Intan Recording Controller Software (the
+         output directories saved by the software generally end with a timestamp).
+    proc_dir : str
+        Full path to directory where you want to save the processed neural data.
+    f_sampling : int
+        Data sampling rate (in Hz). This should match what you set in the Intan Recording software.
+    n_channels : int
+        Total number of amplifier channels. For e.g., if you're using three Utah arrays, you will have
+         96 x 3 = 288 channels.
+    f_low : int
+        The low cut-off frequency (in Hz) for the bandpass filter.
+    f_high : int
+        The high cut-off frequency (in Hz) for the bandpass filter.
+    noise_threshold : float
+        The threshold is set for each recording session and each neural site individually, at
+         noise_threshold * SD over the estimated background noise of the site. The standard deviation
+         is estimated using 10 chunks of the filtered signal, as $$\sigma = \text{median}(\frac{|v|}{0.6745})$$
+         (Quiroga et al, 2004).
+    save_waveform : bool
+        Whether to save spike waverform for each spike or not. This feature is currently not optimized for run-time,
+         so if your recording session was longer than say ~10 min., the job would take infinitely long to finish.
+
+    Returns
+    -------
+
+    """
     # Get names of all directories with the specified 'date'.
     with os.scandir(raw_dir) as it:
         dirs = [entry.name for entry in it if (entry.is_dir() and entry.name.find(date) != -1)]
@@ -79,10 +118,34 @@ def get_spike_times(num, date, raw_dir, proc_dir, f_sampling, n_channels, f_low,
             spikeTime = {'spike_time_ms': spike_times_ms, 'waveform': {'time_ms': waveform_time_ms, 'amplitude_uv': waveform_uv}}
             sio.savemat(os.path.join(proc_dir, d, 'spikeTime') + '/' + files[num][:-4] + '_spk.mat', spikeTime,
                         oned_as='column')
-    return
 
 
 def get_psth(num, date, proc_dir, start_time, stop_time, timebin):
+    """
+    Combines spike event times and behavioral data to make a PSTH.
+
+    Parameters
+    ----------
+    num : int
+        Amplifier channel number aka SLURM job array ID.
+    date : str
+        The date of the recording session. This is used to search directory and file names and filter out sessions only
+         for a particular date. No "smart" searches are supported -- it'll fail to lookup if you use, say,
+         20210624 instead of 210624.
+    proc_dir : str
+        Full path to directory where you want to save the processed neural data.
+    start_time : int
+        Time (in ms) relative to stimulus onset from when you want to start binning spike counts. Pre-stimulus
+         times are indicated with a negative sign, e.g., -100 is 100 ms before stimulus presentation.
+    stop_time
+        Time (in ms) relative to stimulus onset from when you want to stop binning spike counts.
+    timebin
+        Size of the time bins (in ms) for binning. Bins are non-overlapping: (start_time, stop_time]
+
+    Returns
+    -------
+
+    """
     # Get names of all directories with the specified 'date'.
     with os.scandir(proc_dir) as it:
         dirs = [entry.name for entry in it if (entry.is_dir() and entry.name.find(date) != -1)]
@@ -157,11 +220,15 @@ def get_psth(num, date, proc_dir, start_time, stop_time, timebin):
 
             # Re-order the psth to image x reps
             max_number_of_reps = max(np.bincount(mwk_data['stimulus_presented']))  # Max reps obtained for any image
+            if max_number_of_reps == 0:
+                exit()
             mwk_data['stimulus_presented'] = mwk_data['stimulus_presented'].astype(int)  # To avoid indexing errors
-            image_numbers = np.unique(mwk_data['stimulus_presented'])
+            image_numbers = np.unique(mwk_data['stimulus_presented'])  # TODO: if not all images are shown (for eg, exp cut short), you'll have to manually type in total # images
             psth = np.full((len(image_numbers), max_number_of_reps, len(timebase)), np.nan)  # Re-ordered PSTH
 
             for i, image_num in enumerate(image_numbers):
+                if image_num not in mwk_data.stimulus_presented:
+                    continue
                 index_in_table = np.where(mwk_data.stimulus_presented == image_num)[0]
                 selected_cells = psth_matrix[index_in_table, :]
                 # Use i instead of image_num for indexing psth as image_num can be 0-25, or 1-26(!)
@@ -173,10 +240,24 @@ def get_psth(num, date, proc_dir, start_time, stop_time, timebin):
             psth = {'psth': psth, 'meta': meta}
 
             sio.savemat(os.path.join(proc_dir, d, 'psth') + '/' + files[num] + '_psth.mat', psth)
-    return
 
 
 def combine_channels(proc_dir, num_channels=288):
+    """
+    Combines PSTH files for individual channels into a single file.
+
+    Parameters
+    ----------
+    proc_dir : str
+        Full path to directory containing processed neural data.
+    num_channels : int
+        Total number of amplifier channels. For e.g., if you're using three Utah arrays, you will have
+         96 x 3 = 288 channels.
+
+    Returns
+    -------
+
+    """
     dirs = [_ for _ in os.listdir(proc_dir) if not _.startswith('.')]
     for d in dirs:
         filename = d + '_psth.mat'
@@ -201,7 +282,31 @@ def combine_channels(proc_dir, num_channels=288):
     return
 
 
-def combine_sessions(dates, proc_dir, output_dir, normalize=False):
+def combine_sessions(dates, proc_dir, output_dir, normalize=False, save_format='h5'):
+    """
+    Combines PSTH files for all sessions by concating along the repetition axis.
+
+    Parameters
+    ----------
+    dates : list
+        List of session dates for which you want to combine data. E.g., [210526, 210527].
+    proc_dir : str
+        Full path to directory containing processed neural data.
+    output_dir : str
+        Full path to directory you'd like to save data in.
+    normalize : bool
+        If normalize=True, normalization is performed per session. For normalization
+        to work, you'll need to have a normalization PSTH for each of the session dates. If there is more than one
+        normalization session for a particular data (for e.g., you ran the normalization experiment at the start and
+        end of the day), it'll pick the first file.
+    save_format :
+        Format of the output file. Valid choices are 'mat', 'h5', and 'npz'.
+
+    Returns
+    -------
+
+    """
+    assert save_format in ['mat', 'npz', 'h5']
     assert isinstance(dates, (list, np.ndarray))
     dirs = [_ for _ in os.listdir(proc_dir) if not _.startswith('.')]
     dirs = [_ for _ in dirs if any(date in _ for date in dates)]  # Filter for given dates
@@ -210,7 +315,7 @@ def combine_sessions(dates, proc_dir, output_dir, normalize=False):
         logging.debug(f'No directories for dates {dates}')
         return
 
-    if normalize:  # TODO: incomplete -- finish this
+    if normalize:
         # Locate the normalizer directory for this animal
         normalizer_dir = proc_dir[:proc_dir.find('projects/')+len('projects/')] + 'normalizers' + proc_dir[proc_dir.find('/monkeys/'):]
 
@@ -223,6 +328,7 @@ def combine_sessions(dates, proc_dir, output_dir, normalize=False):
             selected_dirs = list(filter(lambda x: date in x, subdirs))
             assert len(selected_dirs) > 0, f'No normalizers found for date {date}'
             n_dirs.append(selected_dirs[0])
+        n_dirs.sort()  # Sort, in case the dates for not sorted
         logging.debug(f'Normalizer directories are {n_dirs}')
 
         # Get the normalizer PSTH files (with their complete path)
@@ -274,6 +380,7 @@ def combine_sessions(dates, proc_dir, output_dir, normalize=False):
         psth_matrix = np.hstack((psth_matrix, p))
         if normalize and date != prev_date:
             normalizer_matrix = np.hstack((normalizer_matrix, normalizer_p))
+            prev_date = date
 
     psth_matrix = _shift_nans(psth_matrix.copy())  # TODO check if copy() necessary
     logging.info(f'Combining sessions - {psth_matrix.shape}')
@@ -285,15 +392,28 @@ def combine_sessions(dates, proc_dir, output_dir, normalize=False):
     monkey_name = proc_dir.split('/monkeys/')[1].split('/')[0]
 
     # Save experiment PSTH
-    filename = f'{monkey_name}.rsvp.{experiment_name}.experiment_psth.mat'
+    filename = f'{monkey_name}.rsvp.{experiment_name}.experiment_psth.{save_format}'
+    if not normalize:
+        filename = f'{monkey_name}.rsvp.{experiment_name}.experiment_psth_raw.{save_format}'
     if not os.path.isfile(os.path.join(output_dir, filename)):
-        # Save psth data
-        meta = {'start_time_ms': float(meta['start_time_ms']),
-                'stop_time_ms': float(meta['stop_time_ms']),
-                'tb_ms':  float(meta['tb_ms'])}
-        psth = {'psth': psth_matrix, 'meta': meta}
+        if save_format == 'mat':
+            meta = {'start_time_ms': float(meta['start_time_ms']),
+                    'stop_time_ms': float(meta['stop_time_ms']),
+                    'tb_ms':  float(meta['tb_ms'])}
+            psth = {'psth': psth_matrix, 'meta': meta}
+            sio.savemat(os.path.join(output_dir, filename), psth, do_compression=True)
+        elif save_format == 'npz':
+            np.savez_compressed(os.path.join(output_dir, filename), psth=psth_matrix, meta=meta)
+        else:
+            output_f = h5py.File(os.path.join(output_dir, filename), 'w')
+            output_f.create_dataset('psth', data=psth_matrix)
 
-        sio.savemat(os.path.join(output_dir, filename), psth)
+            group_meta = output_f.create_group('meta')
+            group_meta.create_dataset('start_time_ms', data=float(meta['start_time_ms']))
+            group_meta.create_dataset('stop_time_ms', data=float(meta['stop_time_ms']))
+            group_meta.create_dataset('tb_ms', data=float(meta['tb_ms']))
+
+            output_f.close()
 
     bin_counts = np.zeros(psth_matrix.shape[1] + 1)
     for image in range(psth_matrix.shape[0]):
@@ -306,17 +426,27 @@ def combine_sessions(dates, proc_dir, output_dir, normalize=False):
         normalizer_matrix = _shift_nans(normalizer_matrix.copy())  # TODO check if copy() necessary
         normalizer_matrix = _remove_nan_cols(normalizer_matrix.copy())  # TODO check if copy() necessary
         logging.debug(f'Normalizer - {normalizer_matrix.shape}')
-        filename = f'{monkey_name}.rsvp.{experiment_name}.normalizer_psth.mat'
+        filename = f'{monkey_name}.rsvp.{experiment_name}.normalizer_psth.{save_format}'
         if not os.path.isfile(os.path.join(output_dir, filename)):
-            # Save psth data
-            meta = {'start_time_ms': float(normalizer_meta['start_time_ms']),
-                    'stop_time_ms': float(normalizer_meta['stop_time_ms']),
-                    'tb_ms': float(normalizer_meta['tb_ms'])}
-            psth = {'psth': normalizer_matrix, 'meta': meta}
+            if save_format == 'mat':
+                meta = {'start_time_ms': float(normalizer_meta['start_time_ms']),
+                        'stop_time_ms': float(normalizer_meta['stop_time_ms']),
+                        'tb_ms': float(normalizer_meta['tb_ms'])}
+                psth = {'psth': normalizer_matrix, 'meta': meta}
 
-            sio.savemat(os.path.join(output_dir, filename), psth)
+                sio.savemat(os.path.join(output_dir, filename), psth)
+            elif save_format == 'npz':
+                np.savez_compressed(os.path.join(output_dir, filename), psth=normalizer_matrix, meta=normalizer_meta)
+            else:
+                output_f = h5py.File(os.path.join(output_dir, filename), 'w')
+                output_f.create_dataset('psth', data=normalizer_matrix)
 
-    return
+                group_meta = output_f.create_group('meta')
+                group_meta.create_dataset('start_time_ms', data=float(normalizer_meta['start_time_ms']))
+                group_meta.create_dataset('stop_time_ms', data=float(normalizer_meta['stop_time_ms']))
+                group_meta.create_dataset('tb_ms', data=float(normalizer_meta['tb_ms']))
+
+                output_f.close()
 
 
 def _shift_nans(data):

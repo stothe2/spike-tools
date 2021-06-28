@@ -194,18 +194,18 @@ def dump_events(filename, photodiode_file, sample_on_file):
     # Double-check `correct_fixation` is actually correct by analyzing the
     # `eye_h` and `eye_v` data
     ###########################################################################
-    # Threshold to check against to determine if we have enough eye data for given stimulus presentation
-    threshold = output['stim_on_time_ms'] // 2
-
-    for i in range(len(eye_h)):
-        if correct_fixation_df.iloc[i]['data'] == 0:  # Skip if already marked incorrect
-            continue
-
-        if len(eye_h[i]) < threshold or len(eye_v[i]) < threshold:
-            correct_fixation_df.at[i, 'data'] = 0
-        elif np.any([np.abs(_) > output['fixation_window_size_degrees'] for _ in eye_h[i]]) or\
-                np.any([np.abs(_) > output['fixation_window_size_degrees'] for _ in eye_v[i]]):
-            correct_fixation_df.at[i, 'data'] = 0
+    # # Threshold to check against to determine if we have enough eye data for given stimulus presentation
+    # threshold = output['stim_on_time_ms'] // 2
+    #
+    # for i in range(len(eye_h)):
+    #     if correct_fixation_df.iloc[i]['data'] == 0:  # Skip if already marked incorrect
+    #         continue
+    #
+    #     if len(eye_h[i]) < threshold or len(eye_v[i]) < threshold:
+    #         correct_fixation_df.at[i, 'data'] = 0
+    #     elif np.any([np.abs(_) > output['fixation_window_size_degrees'] for _ in eye_h[i]]) or\
+    #             np.any([np.abs(_) > output['fixation_window_size_degrees'] for _ in eye_v[i]]):
+    #         correct_fixation_df.at[i, 'data'] = 0
 
     ###########################################################################
     # Save output
