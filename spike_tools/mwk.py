@@ -87,6 +87,7 @@ def dump_events(filename, photodiode_file, sample_on_file):
     ###########################################################################
     stimulus_presented_df = data[data.name == 'stimulus_presented'].reset_index(drop=True)
     correct_fixation_df = data[data.name == 'correct_fixation'].reset_index(drop=True)
+    # stimulus_presented_df = stimulus_presented_df[:len(correct_fixation_df)]  # If you have one extra stimulus event but not fixation, use this
     assert len(stimulus_presented_df) == len(correct_fixation_df)
     # Drop `empty` data (i.e. -1) before the experiment actually began and after it had already ended
     correct_fixation_df = correct_fixation_df[stimulus_presented_df.data != -1].reset_index(drop=True)
@@ -124,6 +125,7 @@ def dump_events(filename, photodiode_file, sample_on_file):
         stimulus_presented_df = stimulus_presented_df[:len(samp_on)]
         correct_fixation_df = correct_fixation_df[:len(samp_on)]
 
+    # samp_on = samp_on[:len(correct_fixation_df)]   # If you have one extra stimulus event but not fixation, use this
     assert len(samp_on) == len(stimulus_presented_df)
 
     ###########################################################################
